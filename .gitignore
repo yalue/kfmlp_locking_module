@@ -1,0 +1,15 @@
+.*
+*.ko
+*.order
+*.mod
+*.o
+*.symvers
+*.mod.c
+userspace_test
+kernel_patch/ioctl_tool/ioctl_tool
+kernel_patch/ioctl_tool/hip_tester
+kernel_patch/ioctl_tool/*.o
+
+# Whitelist .gitignore
+!.gitignore
+

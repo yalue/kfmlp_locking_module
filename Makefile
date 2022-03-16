@@ -1,6 +1,4 @@
-obj-m += gpu_locking_module.o
-
-gpu_locking_module-y := module_entry.o binheap.o
+obj-m += kfmlp_locking_module.o
 
 all:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules

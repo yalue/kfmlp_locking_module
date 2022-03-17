@@ -32,7 +32,7 @@ typedef struct QueueWaiter_s {
 } QueueWaiter;
 
 // The module's current 'k' value for k-FMLP.
-static unsigned int kfmlp_k;
+static uint32_t kfmlp_k;
 
 // The current lock holders. Only the first kfmlp_k entries of this array may
 // be used. Available slots must be NULL.
@@ -49,23 +49,25 @@ static unsigned int release_waiter_count;
 // A linked list of processes waiting to be released.
 static QueueWaiter *release_waiters;
 
+// Forward declaration.
+static long ReleaseKFMLPLock(int print_warning);
+
 static void LockModule(void) {
-  mutex_lock(&module_mutex);
+  mutex_lock(&global_mutex);
 }
 
 static void UnlockModule(void) {
-  mutex_unlock(&module_mutex);
+  mutex_unlock(&global_mutex);
 }
 
 static int KFMLPOpen(struct inode *n, struct file *f) {
-  struct task_struct *p = current;
-  printk("KFMLP device opened by process %d.\n", p->pid);
+  printk("KFMLP device opened by process %d.\n", current->pid);
   return 0;
 }
 
 static int KFMLPRelease(struct inode *n, struct file *f) {
-  // TODO: Release the lock if this process held it.
-  printk("KFMLP device released by process %d.\n", p->pid);
+  ReleaseKFMLPLock(0);
+  printk("KFMLP device released by process %d.\n", current->pid);
   return 0;
 }
 
@@ -82,7 +84,8 @@ static long StartSchedFIFO(struct task_struct *p) {
 
 static long EndSchedFIFO(struct task_struct *p) {
   int policy = p->policy;
-  if ((policy != SCHED_FIFO) && (policy != SCHED_NORMAL)) {
+  if (policy == SCHED_NORMAL) return 0;
+  if (policy != SCHED_FIFO) {
     printk("Attempting to switch to SCHED_NORMAL when not NORMAL or FIFO.\n");
     return -EINVAL;
   }
@@ -156,9 +159,225 @@ static long GetWaiterCount(unsigned long arg) {
   LockModule();
   a.count = release_waiter_count;
   UnlockModule();
-  if (!copy_to_user((void __user *) arg, &a, sizeof(a))) {
+  if (copy_to_user((void __user *) arg, &a, sizeof(a)) != 0) {
+    pr_debug("Error copying GetWaiterCount info to user.\n");
     return -EFAULT;
   }
+  return 0;
+}
+
+// Returns the number of lock holders. Will return 0 if there are no lock
+// holders, including if k is 0. Must be called while global_mutex is held.
+static uint32_t GetLockHolderCount(void) {
+  uint32_t i;
+  uint32_t count = 0;
+  if (kfmlp_k == 0) return 0;
+  for (i = 0; i < kfmlp_k; i++) {
+    if (lock_holders[i] != NULL) count++;
+  }
+  return count;
+}
+
+static long SetNewK(unsigned long arg) {
+  SetKFMLPLockKArgs a;
+  if (copy_from_user(&a, (void __user *) arg, sizeof(a)) != 0) {
+    pr_debug("Error copying SetNewK args from user.\n");
+    return -EFAULT;
+  }
+  if (a.k > KFMLP_MAX_K) {
+    pr_debug("Got new K value (%d) that is too big.\n", (int) a.k);
+    return -EINVAL;
+  }
+  if (a.k == 0) {
+    // I don't think I'll make this an error; perhaps it would be useful to
+    // prevent any attempts to acquire the lock.
+    pr_debug("Warning: got new K value of 0.\n");
+  }
+  LockModule();
+  if (GetLockHolderCount() != 0) {
+    pr_debug("Can't change the K value while tasks hold the lock.\n");
+    UnlockModule();
+    return -EINVAL;
+  }
+  kfmlp_k = a.k;
+  UnlockModule();
+  return 0;
+}
+
+// Adds waiter w to the tail of the queue for the kfmlp lock. Must be called
+// while holding global_mutex.
+static void EnqueueWaiter(QueueWaiter *w) {
+  w->next = NULL;
+  if (lock_waiters_head == NULL) {
+    // There are currently no waiters.
+    w->prev = NULL;
+    lock_waiters_head = w;
+    lock_waiters_tail = w;
+    return;
+  }
+  w->prev = lock_waiters_tail;
+  lock_waiters_tail->next = w;
+  lock_waiters_tail = w;
+}
+
+// Removes the QueueWaiter pointer from the head of the queue for the kfmlp
+// lock and returns it. Returns NULL if there are no enqueued waiters. Must be
+// called while holding global_mutex.
+static QueueWaiter* DequeueWaiter(void) {
+  QueueWaiter *to_return = NULL;
+  if (lock_waiters_head == NULL) return NULL;
+  to_return = lock_waiters_head;
+  if (lock_waiters_head == lock_waiters_tail) {
+    // There was only one waiter.
+    lock_waiters_head = NULL;
+    lock_waiters_tail = NULL;
+    return to_return;
+  }
+  lock_waiters_head = lock_waiters_head->next;
+  lock_waiters_head->prev = NULL;
+  return to_return;
+}
+
+// Takes a pointer to a QueueWaiter *somewhere in the queue* and removes it.
+// w *must* be in the queue.
+static void RemoveQueueWaiter(QueueWaiter *w) {
+  if (w == lock_waiters_head) {
+    // This also takes care of the case where w was the only entry.
+    DequeueWaiter();
+    return;
+  }
+  // At this point, we know the queue contains at least two entries.
+  if (w == lock_waiters_tail) {
+    lock_waiters_tail = w->prev;
+    lock_waiters_tail->next = NULL;
+    return;
+  }
+  // w isn't the first or the last entry in the queue.
+  w->prev->next = w->next;
+  w->next->prev = w->prev;
+  return;
+}
+
+// Searches the lock holders array for a free slot. Returns an arbitrary value
+// greater than KFMLP_MAX_K if no free slot is available. The global_mutex must
+// be held before calling this.
+static uint32_t FindFreeSlot(void) {
+  uint32_t i;
+  for (i = 0; i < kfmlp_k; i++) {
+    if (lock_holders[i] == NULL) return i;
+  }
+  // Will always be greater than kfmlp_k.
+  return KFMLP_MAX_K + 1;
+}
+
+// Returns the lock slot of the calling process. Returns an arbitrary value
+// greater than KFMLP_MAX_K if the lock holder isn't found.
+static uint32_t FindOurSlot(void) {
+  struct task_struct *p = current;
+  uint32_t i;
+  for (i = 0; i < kfmlp_k; i++) {
+    if (lock_holders[i] == p) return i;
+  }
+  return KFMLP_MAX_K + 1;
+}
+
+// Returns after the calling process has acquired the lock. Boosts the caller's
+// priority if the lock is acquired successfully.
+static long AcquireKFMLPLock(unsigned long arg) {
+  struct task_struct *p = current;
+  QueueWaiter waiter;
+  AcquireKFMLPLockArgs a;
+  if (p->policy != SCHED_FIFO) {
+    printk("The KFMLP lock can only be acquired by FIFO tasks.\n");
+    return -EINVAL;
+  }
+
+  LockModule();
+  a.lock_slot = FindFreeSlot();
+  if (a.lock_slot <= kfmlp_k) {
+    // We found a free slot immediately.
+    lock_holders[a.lock_slot] = p;
+    UnlockModule();
+    goto success;
+  }
+
+  // All slots are occupied; we must wait.
+  memset(&waiter, 0, sizeof(waiter));
+  waiter.p = p;
+  EnqueueWaiter(&waiter);
+  set_current_state(TASK_INTERRUPTIBLE);
+  UnlockModule();
+  schedule();
+
+  // Woken up; see if we got the lock; first without the mutex.
+  if (waiter.woken_ok) {
+    a.lock_slot = FindOurSlot();
+    BUG_ON(a.lock_slot >= kfmlp_k);
+    goto success;
+  }
+
+  LockModule();
+  // We were interrupted. Check the race condition where we may have gotten the
+  // lock between being interrupted and acquiring the global_mutex.
+  if (waiter.woken_ok) {
+    a.lock_slot = FindOurSlot();
+    BUG_ON(a.lock_slot >= kfmlp_k);
+    UnlockModule();
+    goto success;
+  }
+  // We were interrupted and don't have the lock. Remove ourselves from the
+  // wait queue.
+  RemoveQueueWaiter(&waiter);
+  UnlockModule();
+  return -EINTR;
+
+success:
+  // At this point, a.lock_slot must be set.
+  if (copy_to_user((void __user *) arg, &a, sizeof(a)) != 0) {
+    printk("Error copying KFMLP lock slot to user process!\n");
+    ReleaseKFMLPLock(1);
+    return -EFAULT;
+  }
+  // Boost our priority.
+  sched_set_fifo(p);
+  return 0;
+}
+
+// Handles the lock-release ioctl, but also may be called anywhere we need to
+// release the KFMLP lock held by the caller. Make sure the global_mutex is
+// *not* held when calling this function from such a context. If print_warning
+// is nonzero, this will print a message to the kernel log if the caller does
+// not hold the lock. In all cases, returns -EINVAL if the lock wasn't held.
+static long ReleaseKFMLPLock(int print_warning) {
+  struct task_struct *p = current;
+  QueueWaiter *w = NULL;
+  uint32_t our_slot;
+  LockModule();
+  our_slot = FindOurSlot();
+  if (our_slot >= kfmlp_k) {
+    UnlockModule();
+    printk("Called ReleaseKFMLPLock when it wasn't held!\n");
+    return -EINVAL;
+  }
+  lock_holders[our_slot] = NULL;
+  w = DequeueWaiter();
+  if (w == NULL) {
+    // There were no waiters for the lock.
+    UnlockModule();
+    sched_set_fifo_low(p);
+    return 0;
+  }
+
+  // Put the new waiter in the lock slot. It will boost its own priority upon
+  // waking.
+  lock_holders[our_slot] = w->p;
+  w->woken_ok = 1;
+  wake_up_process(w->p);
+  w = NULL;
+
+  // Unboost our priority and return.
+  UnlockModule();
+  sched_set_fifo_low(p);
   return 0;
 }
 
@@ -175,18 +394,12 @@ static long KFMLPIoctl(struct file *f, unsigned int nr, unsigned long arg) {
     return ReleaseTS();
   case KFMLP_GET_TS_WAITER_COUNT_IOC:
     return GetWaiterCount(arg);
-  // TODO (next): SET_K_IOC, LOCK_ACQUIRE_IOC, LOCK_RELEASE_IOC
-  //  - Make sure that kfmlp_k is nonzero first. (Set in SET_K)
-  //    - In SET_K just check that all slots are NULL, if k isn't 0.
-  //  - Write enqueue and dequeue helper functions that maintain
-  //    lock_waiters_head and lock_waiters_tail properly.
-  //  - When first acquiring the lock, see if any slots are NULL; we could take
-  //    it immediately. HOWEVER make sure we aren't already in a slot
-  //    ourselves.
-  //  - When unlocking the lock, remove the thing at the head of the queue and
-  //    put it in our (former) slot.
-  //  - If we were interrupted, remove ourselves from the list.
-  //  - When we acquire a lock, boost our priority using sched_set_fifo
+  case KFMLP_SET_K_IOC:
+    return SetNewK(arg);
+  case KFMLP_LOCK_ACQUIRE_IOC:
+    return AcquireKFMLPLock(arg);
+  case KFMLP_LOCK_RELEASE_IOC:
+    return ReleaseKFMLPLock(1);
   }
   printk("Task %d sent an invalid IOCTL to the KFMLP module.\n", p->pid);
   return -EINVAL;
@@ -215,7 +428,7 @@ static int __init InitModule(void) {
   kfmlp_k = 0;
   lock_waiters_head = NULL;
   lock_waiters_tail = NULL;
-  memset(lock_hoders, 0, sizeof(lock_holders));
+  memset(lock_holders, 0, sizeof(lock_holders));
   result = misc_register(&kfmlp_dev);
   if (result != 0) {
     printk("Could not allocate %s device: %d\n", DEVICE_NAME, result);
@@ -228,7 +441,8 @@ static int __init InitModule(void) {
 static void __exit CleanupModule(void) {
   // TODO: Release all waiters prior to cleanup? Does Linux prevent unloading
   // if the device handles aren't closed?
-  misc_deregister(&kfmlp_ctrl_dev);
+  misc_deregister(&kfmlp_dev);
+  printk("KFMLP module unloaded.\n");
 }
 
 module_init(InitModule);

@@ -11,7 +11,8 @@ extern "C" {
 
 // A pointer to this struct is used as an argument to KFMLP_LOCK_ACQUIRE_IOC.
 // If the lock is successully acquired, the "slot" field will be set to the
-// lock slot (between 0 and k-1) the caller is in.
+// lock slot (between 0 and k-1) the caller is in. The lock_slot must be
+// ignored if the ioctl to acquire the lock fails.
 typedef struct {
   uint32_t lock_slot;
 } AcquireKFMLPLockArgs;

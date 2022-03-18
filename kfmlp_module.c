@@ -12,12 +12,6 @@
 #include <linux/wait.h>
 #include "kfmlp_module.h"
 
-// The maximum 'k' value supported by the module.
-#define KFMLP_MAX_K (32)
-
-// The name of the character device.
-#define DEVICE_NAME "kfmlp_module"
-
 // Used when accessing any shared structure in this module.
 struct mutex global_mutex;
 
@@ -160,7 +154,7 @@ static long GetWaiterCount(unsigned long arg) {
   a.count = release_waiter_count;
   UnlockModule();
   if (copy_to_user((void __user *) arg, &a, sizeof(a)) != 0) {
-    pr_debug("Error copying GetWaiterCount info to user.\n");
+    printk("Error copying GetWaiterCount info to user.\n");
     return -EFAULT;
   }
   return 0;
@@ -181,26 +175,27 @@ static uint32_t GetLockHolderCount(void) {
 static long SetNewK(unsigned long arg) {
   SetKFMLPLockKArgs a;
   if (copy_from_user(&a, (void __user *) arg, sizeof(a)) != 0) {
-    pr_debug("Error copying SetNewK args from user.\n");
+    printk("Error copying SetNewK args from user.\n");
     return -EFAULT;
   }
   if (a.k > KFMLP_MAX_K) {
-    pr_debug("Got new K value (%d) that is too big.\n", (int) a.k);
+    printk("Got new K value (%d) that is too big.\n", (int) a.k);
     return -EINVAL;
   }
   if (a.k == 0) {
     // I don't think I'll make this an error; perhaps it would be useful to
     // prevent any attempts to acquire the lock.
-    pr_debug("Warning: got new K value of 0.\n");
+    printk("Warning: got new K value of 0.\n");
   }
   LockModule();
   if (GetLockHolderCount() != 0) {
-    pr_debug("Can't change the K value while tasks hold the lock.\n");
+    printk("Can't change the K value while tasks hold the lock.\n");
     UnlockModule();
     return -EINVAL;
   }
   kfmlp_k = a.k;
   UnlockModule();
+  printk("Set new K value for KFMLP locking to %d.\n", (int) kfmlp_k);
   return 0;
 }
 
@@ -356,7 +351,9 @@ static long ReleaseKFMLPLock(int print_warning) {
   our_slot = FindOurSlot();
   if (our_slot >= kfmlp_k) {
     UnlockModule();
-    printk("Called ReleaseKFMLPLock when it wasn't held!\n");
+    if (print_warning) {
+      printk("Called ReleaseKFMLPLock when it wasn't held!\n");
+    }
     return -EINVAL;
   }
   lock_holders[our_slot] = NULL;

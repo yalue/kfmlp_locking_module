@@ -117,6 +117,7 @@ static long WaitForTSRelease(void) {
     return 0;
   }
   // We were interrupted and need to remove ourselves from the list.
+  printk("PID %d interrupted while waiting for TS release.\n", current->pid);
   if (release_waiters == &waiter) release_waiters = waiter.next;
   if (waiter.prev) waiter.prev->next = waiter.next;
   if (waiter.next) waiter.next->prev = waiter.prev;
@@ -288,8 +289,18 @@ static long AcquireKFMLPLock(unsigned long arg) {
   }
 
   LockModule();
+  if (kfmlp_k == 0) {
+    UnlockModule();
+    printk("Can't acquire KFMLP lock when k is set to 0.\n");
+    return -EINVAL;
+  }
+  if (FindOurSlot() < kfmlp_k) {
+    UnlockModule();
+    printk("Nested KFMLP lock acquisition prevented.\n");
+    return -EINVAL;
+  }
   a.lock_slot = FindFreeSlot();
-  if (a.lock_slot <= kfmlp_k) {
+  if (a.lock_slot < kfmlp_k) {
     // We found a free slot immediately.
     lock_holders[a.lock_slot] = p;
     UnlockModule();
@@ -322,6 +333,7 @@ static long AcquireKFMLPLock(unsigned long arg) {
   }
   // We were interrupted and don't have the lock. Remove ourselves from the
   // wait queue.
+  printk("PID %d interrupted while waiting for KFMLP lock.\n", current->pid);
   RemoveQueueWaiter(&waiter);
   UnlockModule();
   return -EINTR;

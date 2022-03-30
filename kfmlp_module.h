@@ -73,6 +73,10 @@ typedef struct {
 // cleaning up a task.)
 #define KFMLP_END_SCHED_FIFO_IOC _IO('h', 0xb1)
 
+// Returns the module's current 'k' value. Takes the same args as the SET_K_IOC
+// but fills in the struct's 'k' field.
+#define KFMLP_GET_K_IOC _IOR('h', 0xb2, SetKFMLPLockKArgs)
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

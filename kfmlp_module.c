@@ -390,6 +390,18 @@ static long ReleaseKFMLPLock(int print_warning) {
   return 0;
 }
 
+static long GetCurrentK(unsigned long arg) {
+  SetKFMLPLockKArgs a;
+  LockModule();
+  a.k = kfmlp_k;
+  UnlockModule();
+  if (copy_to_user((void __user *) arg, &a, sizeof(a)) != 0) {
+    printk("Error copying current K info to user.\n");
+    return -EFAULT;
+  }
+  return 0;
+}
+
 static long KFMLPIoctl(struct file *f, unsigned int nr, unsigned long arg) {
   struct task_struct *p = current;
   switch (nr) {
@@ -409,6 +421,8 @@ static long KFMLPIoctl(struct file *f, unsigned int nr, unsigned long arg) {
     return AcquireKFMLPLock(arg);
   case KFMLP_LOCK_RELEASE_IOC:
     return ReleaseKFMLPLock(1);
+  case KFMLP_GET_K_IOC:
+    return GetCurrentK(arg);
   }
   printk("Task %d sent an invalid IOCTL to the KFMLP module.\n", p->pid);
   return -EINVAL;

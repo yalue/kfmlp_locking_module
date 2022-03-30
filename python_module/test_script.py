@@ -22,6 +22,9 @@ def task_entry(task_num):
 def main():
     kfmlp_control.reset_module_handle()
     kfmlp_control.set_k(3)
+    if kfmlp_control.get_k() != 3:
+        print("Got wrong K value from module!")
+        exit()
     processes = []
     process_count = 20
     for i in range(process_count):

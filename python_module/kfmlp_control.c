@@ -87,6 +87,13 @@ static PyObject* EndSchedFIFO(PyObject *self, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+static PyObject* GetCurrentK(PyObject *self, PyObject *args) {
+  SetKFMLPLockKArgs arg;
+  int result = ioctl(module_handle, KFMLP_GET_K_IOC, &arg);
+  if (!CheckIoctlResult(result)) return NULL;
+  return Py_BuildValue("I", (unsigned int) arg.k);
+}
+
 static PyMethodDef kfmlp_control_methods[] = {
   {
     "reset_module_handle",
@@ -142,6 +149,12 @@ static PyMethodDef kfmlp_control_methods[] = {
     EndSchedFIFO,
     METH_NOARGS,
     "Makes a SCHED_FIFO caller into SCHED_NORMAL.",
+  },
+  {
+    "get_k",
+    GetCurrentK,
+    METH_NOARGS,
+    "Returns the current 'k' setting for the KFMLP lock.",
   },
   {NULL, NULL, 0, NULL},
 };

@@ -12,6 +12,9 @@
 #include <linux/wait.h>
 #include "kfmlp_module.h"
 
+// Uncomment to enable priority boosting the lock holders.
+// #define USE_PRIORITY_BOOSTING (1)
+
 // Used when accessing any shared structure in this module.
 struct mutex global_mutex;
 
@@ -283,10 +286,6 @@ static long AcquireKFMLPLock(unsigned long arg) {
   struct task_struct *p = current;
   QueueWaiter waiter;
   AcquireKFMLPLockArgs a;
-  if (p->policy != SCHED_FIFO) {
-    printk("The KFMLP lock can only be acquired by FIFO tasks.\n");
-    return -EINVAL;
-  }
 
   LockModule();
   if (kfmlp_k == 0) {
@@ -345,8 +344,10 @@ success:
     ReleaseKFMLPLock(1);
     return -EFAULT;
   }
+#ifdef USE_PRIORITY_BOOSTING
   // Boost our priority.
   sched_set_fifo(p);
+#endif
   return 0;
 }
 
@@ -356,7 +357,6 @@ success:
 // is nonzero, this will print a message to the kernel log if the caller does
 // not hold the lock. In all cases, returns -EINVAL if the lock wasn't held.
 static long ReleaseKFMLPLock(int print_warning) {
-  struct task_struct *p = current;
   QueueWaiter *w = NULL;
   uint32_t our_slot;
   LockModule();
@@ -373,7 +373,11 @@ static long ReleaseKFMLPLock(int print_warning) {
   if (w == NULL) {
     // There were no waiters for the lock.
     UnlockModule();
-    sched_set_fifo_low(p);
+#ifdef USE_PRIORITY_BOOSTING
+    // It would probably be better to save the task's old scheduler and
+    // priority rather than assuming it was SCHED_FIFO.
+    sched_set_fifo_low(current);
+#endif
     return 0;
   }
 
@@ -384,9 +388,10 @@ static long ReleaseKFMLPLock(int print_warning) {
   wake_up_process(w->p);
   w = NULL;
 
-  // Unboost our priority and return.
   UnlockModule();
+#ifdef USE_PRIORITY_BOOSTING
   sched_set_fifo_low(p);
+#endif
   return 0;
 }
 

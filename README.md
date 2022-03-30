@@ -9,8 +9,8 @@ Multiprocessor Locking Protocol) on Linux. (In English: up to _k_ processes
 can hold the lock at a time, and any additional processes wait for one of the
 _k_ slots in FIFO order.)
 
-This module should run on Vanilla Linux, but is only usable by `SCHED_FIFO`
-tasks, possibly with a few other small restrictions.
+This module should run on vanilla Linux. Tested on versions 5.14-5.17, but
+will likely work for later versions as well.
 
 Usage
 -----
